@@ -37,7 +37,7 @@ class EsSearchDocument:
         self.__config['body'] = kwargs.get('fields')
         self.__config['id'] = kwargs.get('id', str(uuid4()))
         self.__config['doc_type'] = kwargs.get('doc_type')
-        self.rank = kwargs.get('rank', str(datetime.now()))
+        self.rank = kwargs.get('rank', datetime.now())
         if not all(self.__config.values()):
             raise IncompleteParameters(self.__config)
         body = {}
