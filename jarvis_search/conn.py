@@ -22,23 +22,28 @@ from django.conf import settings
 import elasticsearch
 from elasticsearch import Elasticsearch, RequestsHttpConnection
 
-from jarvis_frontend.utilities import isDevelopmentServer
+is_appengine_env = True
+try:
+    from jarvis_frontend.utilities import isDevelopmentServer
+except:
+    is_appengine_env = False
 
 class ElasticSearchClient:
     def __init__(self):
         SERVERS = getattr(settings, 'ES_HOSTS', [])
-        if isDevelopmentServer():
-            __servers = []
+        if is_appengine_env:
+            if isDevelopmentServer():
+                __servers = []
+                for server in SERVERS:
+                    if 'production' in server and server['production']:
+                        continue
+                    __servers.append(server)
+                SERVERS = __servers
             for server in SERVERS:
-                if 'production' in server and server['production']:
-                    continue
-                __servers.append(server)
-            SERVERS = __servers
-        for server in SERVERS:
-            if 'use_ssl' and server['use_ssl'] == True:
-                url = "https://%s:%s/" % (server['host'], server['port'])
-            else:
-                url = "http://%s:%s/" % (server['host'], server['port'])
-            server['url'] = url
+                if 'use_ssl' and server['use_ssl'] == True:
+                    url = "https://%s:%s/" % (server['host'], server['port'])
+                else:
+                    url = "http://%s:%s/" % (server['host'], server['port'])
+                server['url'] = url
         self.SERVERS = SERVERS
         self.es = Elasticsearch(SERVERS)
