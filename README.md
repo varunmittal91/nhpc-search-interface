@@ -1,0 +1,1 @@
+Interface wrapper for elasticsearch
