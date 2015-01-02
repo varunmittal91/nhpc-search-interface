@@ -19,3 +19,8 @@
 
 from .scored_document import EsSearchDocument, EsStringField, EsTextField, stop_words
 from .index import EsIndex, EsQueryObject
+
+from django.conf import settings
+LOAD_NHPCDB = getattr(settings, 'LOAD_NHPCDB', None)
+if LOAD_NHPCDB:
+    import nhpcdb as NhpcDB
