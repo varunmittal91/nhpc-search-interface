@@ -1,10 +1,13 @@
 from uuid import uuid4
 import zlib
 import json
-import pickle
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
 import calendar
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from cassandra import InvalidRequest, AlreadyExists
 
@@ -20,36 +23,33 @@ cassandra_types = {
 }
 
 class DBProperty(object):
-    def __init__(self, required=False, default=None, validator=None, repeated=None, **kwargs):
-        try:
-            del self._value
-        except AttributeError:
-            pass
+    required = False
+    default  = None
+    validator = None
+    repeated = None
 
+    def __init__(self, required=False, default=None, validator=None, repeated=None, **kwargs):
         if default:
             self._value = default
         self._required = required
-    def reInit(self):
-        try:
-            del self._value
-        except AttributeError:
-            pass
     def setValue(self, value):
-        raise NhpcDBFieldNotImplemented(self.__class__.__name__)
-    def getValue(self, attr, is_new):
+        raise NhpcDBFieldNotImplemented(self.__class__.__name__), self._attr
+    def getValue(self, attr, is_new, value=None):
         self._attr = attr
-        try:
-            return {'attr': attr, 'value': self._value, '_t': self._type}
-        except AttributeError:
-            if self._required:
-                if is_new:
-                    raise NhpcDBFieldRequired(self.__class__.__name__, attr)
+        if value:
+            return {'attr': attr, 'value': value, '_t': self._type}
+        else:
             return {'attr': attr, 'value': 'null', '_t': self._type}
-    def loadValue(self, value):
-        self._value = value.replace("''", "'")
-    def readValue(self):
+    def getDefault(self, is_new=True):
         try:
             return self._value
+        except AttributeError:
+            if is_new and self._required:
+                raise NhpcDBFieldRequired(self.__class__.__name__, self._attr)
+            return
+    def readValue(self, value):
+        try:
+            return value
         except AttributeError:
             return
     def _operation(self, value, symbol):
@@ -71,15 +71,14 @@ class IntegerProperty(DBProperty):
     def __init__(self, default=None, required=False):
         super(self.__class__, self).__init__(default=default, required=required)
     def setValue(self, value):
-        self._value = int(value)
+        return int(value)
 
 class DateTimeProperty(DBProperty):
     _type = 'datetime'
 
     def __init__(self, default=None, required=False, auto_now=False, auto_now_add=False):
         if default:
-            self._value = default
-            self.__validate()
+            self._value = self.__validate(default)
         try:
             assert isinstance(auto_now, bool)
             assert isinstance(auto_now_add, bool)
@@ -89,29 +88,30 @@ class DateTimeProperty(DBProperty):
         self._auto_now = auto_now
         self._auto_now_add = auto_now_add            
     def setValue(self, value):
-        self._value = value
-        self.__validate()
-    def getValue(self, attr, is_new):
+        return self.__validate(value)
+    def getDefault(self, is_new=True):
+        if (is_new and self._auto_now_add) or self._auto_now:
+            return self.__validate(datetime.now())
+        return super(DateTimeProperty, self).getDefault()
+    def getValue(self, attr, is_new, value=None):
         if self._auto_now or (self._auto_now_add and is_new):
-            self._value = datetime.now()
-            self._validate()
-        return super(self.__class__, self).getValue(attr, is_new)
-    def __validate(self):
-        if not isinstance(self._value, datetime):
+            value = self.__validate(datetime.now())
+        return super(DateTimeProperty, self).getValue(attr, is_new, value)
+    def __validate(self, value):
+        if not isinstance(value, datetime):
             raise NhpcDBInvalidValue(self.__class__.__name__, datetime.__name__)
-        self._value = calendar.timegm(self._value.utctimetuple())
+        value = (value - datetime.utcfromtimestamp(0))
+        value = long(value.total_seconds() * 1000.0)
+        return value
     def _operation(self, value, symbol):
         if not isinstance(value, datetime):
             raise NhpcDBInvalidValue(self.__class__.__name__, datetime.__name__)
         value = calendar.timegm(value.utctimetuple())
         return "%s %s %s" % (self._attr, symbol, value)
-    def loadValue(self, value):
-        self.setValue(value)
-    def readValue(self):
-        try:
-            return datetime.fromtimestamp(self._value)
-        except AttributeError:
-            return
+    def readValue(self, value):
+        if isinstance(value, datetime):
+            return value
+        return datetime.fromtimestamp(long(value)/1e3)
 
 DateProperty = DateTimeProperty
 TimeProperty = DateTimeProperty
@@ -124,16 +124,13 @@ class StringProperty(DBProperty):
             self._value = "'%s'" % default
         super(StringProperty, self).__init__(required=required)
     def setValue(self, value):
-        self._value = "'%s'" % value.replace("'", "''")
-    def getValue(self, attr, is_new):
-        return super(self.__class__, self).getValue(attr, is_new)
+        return "'%s'" % value.replace("'", "''")
+    def getValue(self, attr, is_new, value=None):
+        return super(self.__class__, self).getValue(attr, is_new, value)
     def _operation(self, value, symbol):
         return "%s %s '%s'" % (self._attr, symbol, value)
-    def readValue(self):
-        try:
-            return self._value.replace("''", "'")
-        except AttributeError:
-            return
+    def readValue(self, value):
+        return value.replace("''", "'")
 
 class BlobProperty(DBProperty):
     _type = 'blob'
@@ -141,31 +138,29 @@ class BlobProperty(DBProperty):
     def __init__(self, compressed=False, required=False, default=None):
         self._compressed=compressed
         if default:
-            self._value = default
-            self.__validate()
+            self._value = self.__validate(default)
         super(BlobProperty, self).__init__(required=required)
-    def getValue(self, attr, is_new):
-        try:
-            return {'attr': attr, 'value': "textAsBlob('%s')" % self._value.encode("hex"), '_t': self._type}
-        except AttributeError: 
-            if self._required:
-                if is_new:
-                    raise NhpcDBFieldRequired(self.__class__.__name__, attr)
+    def getValue(self, attr, is_new, value=None):
+        if value:
+            return {'attr': attr, 'value': "textAsBlob('%s')" % value.encode("hex"), '_t': self._type}
+        else: 
             return {'attr': attr, 'value': 'null', '_t': self._type}
     def setValue(self, value):
-        self._value = value
-        self.__validate()
-    def __validate(self):
+        return self.__validate(value)
+    def __validate(self, value):
         if self._compressed:
-            self._value = zlib.compress(self._value)
-    def loadValue(self, value):
-        self._value = value.decode('hex')
-    def readValue(self):
-        return self._decompress()
-    def _decompress(self):
+            value = zlib.compress(value)
+        return value
+    def readValue(self, value):
+        return self._decompress(value)
+    def _decompress(self, value):
+        try:
+            value = value.decode('hex')
+        except TypeError:
+            pass
         if self._compressed:
-            return zlib.decompress(self._value)
-        return self._value
+            return zlib.decompress(value)
+        return value
 
 TextProperty = BlobProperty
 class JsonProperty(BlobProperty):
@@ -177,8 +172,7 @@ class JsonProperty(BlobProperty):
         super(JsonProperty, self).__init__(kwargs)
     def setValue(self, value):
         json.loads(value)
-        self._value = value
-        super(JsonProperty, self).setValue(value)
+        return super(JsonProperty, self).setValue(value)
 class PickleProperty(BlobProperty):
     def __init__(self, **kwargs):
         default = kwargs.get('default', None)
@@ -187,11 +181,10 @@ class PickleProperty(BlobProperty):
             kwargs['default'] = pickle.dumps(value)
         super(PickleProperty, self).__init__(kwargs)
     def setValue(self, value):
-        value = pickle.dumps(value)
-        super(PickleProperty, self).setValue(value)
-    def readValue(self):
+        return super(PickleProperty, self).setValue(pickle.dumps(value))
+    def readValue(self, value):
         try:
-            value = self._decompress()
+            value = self._decompress(value)
             return pickle.loads(value)
         except AttributeError:
             return None
@@ -207,6 +200,7 @@ class BaseClass(type):
         for field_name, field_type in attr.items():
             if isinstance(field_type, DBProperty):
                 self._columns[field_name] = field_type
+                field_type.getValue(field_name, False)
         super(BaseClass, self).__init__(name, bases, attr)
         self.name = super(BaseClass, self).__name__.lower()
 
@@ -215,49 +209,57 @@ class Models(object):
     _key = StringProperty()
 
     def __init__(self, **kwargs):
+        self._attributes = {}
+        columns = self._columns
+        attributes = self._attributes
         try:
             self.__key = kwargs['key']
             self._new_instance = False
         except KeyError:
             self._new_instance = True
             self.__key = str(uuid4())
-        self._key.setValue(self.__key)
-            
-        for attr,value in kwargs.items():
+            for key in set(columns.keys()) - set(['keys']):
+                column = columns[key]
+                try:
+                    attributes[key] = column.setValue(kwargs[key])
+                except KeyError:
+                    attributes[key] = column.getDefault()
             try:
-                column = self._columns[attr]
-                column.setValue(value)
-            except KeyError:
-                raise NhpcDBInvalidAttribute(self.__class__.__name__, attr)
-        self._attrs = []
-        attrs_append = self._attrs.append
-        for attr,column in self._columns.items():
-            value = column.getValue(attr, self._new_instance)
-            if value:
-                attrs_append(value)
+                raise NhpcDBInvalidAttribute(self.__class__.__name__, [key for key in set(kwargs.keys()) - set(attributes.keys())][0])
+            except IndexError:
+                pass
+        attributes['key'] = self._key.setValue(self.__key)
+    def getFields(self):
+        return self._attributes.keys()
     def __getattribute__(self, name):
         _columns = super(Models, self).__getattribute__('_columns')
         try:
-            return _columns[name].readValue()
-        except KeyError:
+            column = _columns[name]
+            _attributes = super(Models, self).__getattribute__('_attributes')
+            value = _attributes.get(name)
+            if not value:
+                return
+            return column.readValue(value)
+        except (KeyError, AttributeError):
             return super(Models, self).__getattribute__(name)
     def loadRow(self, row, projection):
         if not projection:
-            projection = [self._columns.keys()]
+            projection = self._columns.keys()
         for key in projection:
             value = getattr(row, key, None)
-            if value:
-                self._columns[key].loadValue(value)
-    def reInit(self):
-        for column in self._columns.values():
-            column.reInit()
+            self._attributes[key] = value
     def key(self):
         return self._key
     @classmethod
     def query(*args):
-        return NhpcDBQueryObject(args[0](), args[1:])
+        return NhpcDBQueryObject(args[0], args[1:])
     def put(self):
-        values = [str(attr['value']) for attr in self._attrs]
+        values = []
+        values_append = values.append
+        attributes = self._attributes
+        for attr,column in self._columns.items():
+            value = column.getValue(attr, self._new_instance, attributes[attr])
+            values_append(str(value['value']))
         command = "insert into %s (%s) values (%s)"% (self.__class__.__name__, ", ".join(self._columns.keys()), ", ".join(values))
         try:
             cassandra_conn.session.execute(command)

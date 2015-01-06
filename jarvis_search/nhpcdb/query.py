@@ -11,7 +11,7 @@ class NhpcDBQueryObject:
         self.__model_t = trgt_class
     def fetch(limit=10):
         pass
-    def fetch_async(self, limit=10, projection=[]):
+    def fetch_async(self, limit=None, projection=[]):
         results = []
 
         if projection:
@@ -19,12 +19,13 @@ class NhpcDBQueryObject:
             columns = "%s, key" % (",".join(projection))
         else:
             columns = "*"
-        query = "select %s %s limit %d" % (columns, self.__query, limit)
+        try:
+            query = "select %s %s limit %d" % (columns, self.__query, limit)
+        except TypeError:
+            query = "select %s %s" % (columns, self.__query)
         rows = cassandra_conn.query(query)
         for row in rows:
-            new_model = deepcopy(self.__model_t)
-            new_model.__init__(key=row.key)
-            new_model.reInit()
+            new_model = deepcopy(self.__model_t)(key=row.key)
             new_model.loadRow(row, projection)
             results.append(new_model)
         return results

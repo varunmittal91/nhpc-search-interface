@@ -10,9 +10,10 @@ class CassandraClient:
         try:
             self.session = cluster.connect(keyspace)
         except InvalidRequest as e:
-            self.session = cluster.connect()
+            session = cluster.connect()
             session.execute("CREATE KEYSPACE %s WITH replication = {'class':'SimpleStrategy', 'replication_factor':3};" % keyspace)
             session.set_keyspace(keyspace)
+            self.session = session
     def put(self, table, fields):
         pass
     def query(self, query):

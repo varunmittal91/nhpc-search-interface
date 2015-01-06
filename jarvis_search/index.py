@@ -17,10 +17,12 @@
 #       along with JARVIS.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import sys
 import base64
 import simplejson as json
 import requests
 from requests.auth import HTTPBasicAuth
+from copy import deepcopy
 is_appengine_environment = False
 
 try:
@@ -39,6 +41,9 @@ from .scored_document import EsSearchDocument, EsFieldBase
 es_client_conn = ElasticSearchClient()
 
 class EsIndex:
+    transaction_header_size = 100
+    max_transaction_size = 10000000 - transaction_header_size
+
     def __init__(self, name):
         self.__name = name.lower()
     def get(self, search_doc_id, doc_type):
@@ -72,7 +77,7 @@ class EsIndex:
                 __documents.append(document.getDoc(self.__name))
         else:
             __documents.append(documents.getDoc(self.__name))
-        actions = []           
+        actions = EsActions()
         for document in __documents:
             action = {
                 "_index": document['index'],
@@ -80,30 +85,27 @@ class EsIndex:
                 "_id": document['id'],
                 "_source": document['body'],
             }
-            actions.append(action)
-            if len(actions) == 200:
-                __results = self.__put__(actions)
-                results.extend(__results)
-                del actions[0:len(actions)]
-        if (len(actions) > 0):
-            __results = self.__put__(actions) 
-            results.extend(__results)
-            del actions[0:len(actions)]
+            actions.addAction(action)
+        actions.push()
+        results = actions.push()
+        del actions
         return results
     def delete(self, search_doc_ids, doc_type):
         actions = []
         if type(search_doc_ids) != list:
             search_doc_ids = [search_doc_ids]
+        actions = EsActions()
         for doc_id in search_doc_ids:
-            actions.append({
+            actions.addAction({
                 "_op_type": 'delete',
-                "_index": self.__name, 
+                "_index": self.__name,
                 "_type": doc_type,
                 "_id": doc_id,
             })
-        __results = helpers.bulk(client=es_client_conn.es, actions=actions,)
+        actions.push()
+        results = actions.getResults()
         del actions
-        return __results[0]
+        return results
     def __put__(self, actions):
         results = [action['_id'] for action in actions]
         if is_appengine_environment:
@@ -127,14 +129,18 @@ class EsIndex:
         config = query_object.getSearchObject()
 
         _source = config.get('_source', "")
-        if len(_source) > 0:
+        if len(_source) > 0 and not _source.endswith('_rank'):
             _source = "%s,_rank" % _source
         else:
             _source = "_rank"
         config['_source'] = _source
 
         config['index'] = self.__name
-        config['sort']  = "_rank:desc"        
+        if config['reverse']:
+            config['sort']  = "_rank:asc"        
+        else:
+            config['sort']  = "_rank:desc"
+        del config['reverse']
         try:
             if is_appengine_environment:
                 retry_count = 0
@@ -155,13 +161,51 @@ class EsIndex:
         server = es_client_conn.SERVERS[0]
         credentials = server['http_auth'].split(':')
         payload = {'q': query_object.getQueryString(), 'm': query_object.getOffset(), 's': query_object.getLimit()}
-        r = requests.get("%s/search/" % server['url'], auth=HTTPBasicAuth(credentials[0], credentials[1]), params=payload)
+        r = requests.get("%s/search/" % server['url'], auth=HTTPBasicAuth(credentials[0], credentials[1]), params=payload, timeout=60)
         if r.status_code == 200:
             return r.content
         return
 
+class EsActions:
+    transaction_header_size = 100
+    max_transaction_size = 10000000 - transaction_header_size
+
+    def __init__(self):
+        self.__actions = []
+        self.__results = []
+        self.__action_size = 0
+    def __del__(self):
+        del self.__actions
+    def addAction(self, action):
+        self.__actions.append(action)
+        self.__action_size += sys.getsizeof(str(action))
+        results = None
+        if len(self.__actions) > 200 or self.__action_size > self.max_transaction_size:
+            results = self.push()
+            del self.__actions
+            self.__actions = []
+            self.__action_size = 0
+        return results
+    def push(self):
+        if is_appengine_environment:
+            retry_count = 0
+            while retry_count < 5:
+                try:
+                    __results = helpers.bulk(client=es_client_conn.es, actions=self.__actions,)
+                    break
+                except DeadlineExceededError:
+                    retry_count += 1
+            if retry_count == 5:
+                raise DeadlineExceededError
+        else:
+            __results = helpers.bulk(client=es_client_conn.es, actions=self.__actions,)
+        for action in self.__actions:
+            self.__results.append(action['_id'])
+    def getResults(self):
+        return self.__results
+
 class EsQueryObject:
-    def __init__(self, query_string, doc_type, returned_fields=[], limit=25, default_operator="AND", offset=0):
+    def __init__(self, query_string, doc_type, returned_fields=[], limit=25, default_operator="AND", offset=0, reverse=False):
         self.__config = {}
         if returned_fields:
             self.__config['_source'] = ",".join(returned_fields)
@@ -170,8 +214,10 @@ class EsQueryObject:
         self.__config['doc_type'] = doc_type
         self.__config['default_operator'] = default_operator
         self.__config['from_'] = offset
+        self.__config['reverse'] = reverse
     def getSearchObject(self):
-        return self.__config 
+        # temporary fix for index query, deleting parameters to make compatible to elasticsearch api
+        return deepcopy(self.__config)
     def getQueryString(self):
         return self.__config['q']
     def getLimit(self):

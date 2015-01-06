@@ -64,7 +64,7 @@ class EsFieldBase:
 def tokenize_string(phrase):
     a = []
     for word in phrase.split():
-        if word in stop_words:
+        if len(word) > 12 or word in stop_words:
             continue
         for j in xrange(3, len(word)):
             for i in xrange(0, len(word)-j+1):
@@ -76,7 +76,7 @@ class EsStringField(EsFieldBase):
     def __init__(self, **kwargs):
         value = kwargs.get('value', "")
         value = tokenize_string(value)
-        kwargs['value'] = value
+        kwargs['value'] = " ".join(value)
         EsFieldBase.__init__(self, **kwargs)
 
 class EsTextField(EsFieldBase):
