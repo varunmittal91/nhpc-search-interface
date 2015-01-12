@@ -9,11 +9,15 @@ import calendar
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
-from cassandra import InvalidRequest, AlreadyExists
+#from cassandra import InvalidRequest, AlreadyExists
 
 from .exceptions import NhpcDBInvalidAttribute, NhpcDBFieldNotImplemented, NhpcDBFieldRequired, NhpcDBInvalidValue, NhpcDBInvalidProperty 
 from .query import NhpcDBQueryObject
-from .conn import cassandra_conn
+from .conn_common import db_opts
+try:
+    from .conn import cassandra_conn
+except ImportError:
+    from .conn_webi import cassandra_conn
 
 cassandra_types = {
     'integer': 'int',
@@ -28,7 +32,8 @@ class DBProperty(object):
     validator = None
     repeated = None
 
-    def __init__(self, required=False, default=None, validator=None, repeated=None, **kwargs):
+    def __init__(self, required=False, default=None, validator=None, repeated=None, indexed = False, **kwargs):
+        self._indexed = indexed
         if default:
             self._value = default
         self._required = required
@@ -37,9 +42,9 @@ class DBProperty(object):
     def getValue(self, attr, is_new, value=None):
         self._attr = attr
         if value:
-            return {'attr': attr, 'value': value, '_t': self._type}
+            return {'attr': attr, 'value': value, '_t': self._type, 'indexed': self._indexed}
         else:
-            return {'attr': attr, 'value': 'null', '_t': self._type}
+            return {'attr': attr, 'value': 'null', '_t': self._type, 'indexed': self._indexed}
     def getDefault(self, is_new=True):
         try:
             return self._value
@@ -68,15 +73,15 @@ class DBProperty(object):
 class IntegerProperty(DBProperty):
     _type = 'integer'
 
-    def __init__(self, default=None, required=False):
-        super(self.__class__, self).__init__(default=default, required=required)
+    def __init__(self, default=None, required=False, indexed=False):
+        super(self.__class__, self).__init__(default=default, required=required, indexed=indexed)
     def setValue(self, value):
         return int(value)
 
 class DateTimeProperty(DBProperty):
     _type = 'datetime'
 
-    def __init__(self, default=None, required=False, auto_now=False, auto_now_add=False):
+    def __init__(self, default=None, required=False, auto_now=False, auto_now_add=False, indexed=False):
         if default:
             self._value = self.__validate(default)
         try:
@@ -84,7 +89,7 @@ class DateTimeProperty(DBProperty):
             assert isinstance(auto_now_add, bool)
         except AssertionError:
             raise NhpcDBInvalidProperty(["auto_now", "auto_now_add"], "bool")
-        super(self.__class__, self).__init__(required=required)
+        super(self.__class__, self).__init__(required=required, indexed=indexed)
         self._auto_now = auto_now
         self._auto_now_add = auto_now_add            
     def setValue(self, value):
@@ -119,10 +124,10 @@ TimeProperty = DateTimeProperty
 class StringProperty(DBProperty):
     _type = 'string'
 
-    def __init__(self, required=False, default=None):
+    def __init__(self, required=False, default=None, indexed=False):
         if default:
             self._value = "'%s'" % default
-        super(StringProperty, self).__init__(required=required)
+        super(StringProperty, self).__init__(required=required, indexed=indexed)
     def setValue(self, value):
         return "'%s'" % value.replace("'", "''")
     def getValue(self, attr, is_new, value=None):
@@ -137,14 +142,14 @@ class BlobProperty(DBProperty):
 
     def __init__(self, compressed=False, required=False, default=None):
         self._compressed=compressed
-        if default:
+        if default != None:
             self._value = self.__validate(default)
         super(BlobProperty, self).__init__(required=required)
     def getValue(self, attr, is_new, value=None):
         if value:
-            return {'attr': attr, 'value': "textAsBlob('%s')" % value.encode("hex"), '_t': self._type}
+            return {'attr': attr, 'value': "textAsBlob('%s')" % value.encode("hex"), '_t': self._type, 'indexed': self._indexed}
         else: 
-            return {'attr': attr, 'value': 'null', '_t': self._type}
+            return {'attr': attr, 'value': 'null', '_t': self._type, 'indexed': self._indexed}
     def setValue(self, value):
         return self.__validate(value)
     def __validate(self, value):
@@ -169,7 +174,7 @@ class JsonProperty(BlobProperty):
         required = kwargs.get('required', None)
         if default:
             json.loads(default)
-        super(JsonProperty, self).__init__(kwargs)
+        super(JsonProperty, self).__init__(**kwargs)
     def setValue(self, value):
         json.loads(value)
         return super(JsonProperty, self).setValue(value)
@@ -177,9 +182,9 @@ class PickleProperty(BlobProperty):
     def __init__(self, **kwargs):
         default = kwargs.get('default', None)
         required = kwargs.get('required', None)
-        if default:
-            kwargs['default'] = pickle.dumps(value)
-        super(PickleProperty, self).__init__(kwargs)
+        if default != None:
+            kwargs['default'] = pickle.dumps(default)
+        super(PickleProperty, self).__init__(**kwargs)
     def setValue(self, value):
         return super(PickleProperty, self).setValue(pickle.dumps(value))
     def readValue(self, value):
@@ -246,35 +251,28 @@ class Models(object):
         if not projection:
             projection = self._columns.keys()
         for key in projection:
-            value = getattr(row, key, None)
+            value = row.get(key, None)
             self._attributes[key] = value
     def key(self):
         return self._key
     @classmethod
     def query(*args):
         return NhpcDBQueryObject(args[0], args[1:])
-    def put(self):
+    def put(self, db_opts=None):
         values = []
         values_append = values.append
         attributes = self._attributes
         for attr,column in self._columns.items():
             value = column.getValue(attr, self._new_instance, attributes[attr])
             values_append(str(value['value']))
-        command = "insert into %s (%s) values (%s)"% (self.__class__.__name__, ", ".join(self._columns.keys()), ", ".join(values))
-        try:
-            cassandra_conn.session.execute(command)
-        except InvalidRequest as e:
-            desc_query = "select * from system.schema_columns where keyspace_name='nhpcdb' and columnfamily_name = '%s'" % (self.__class__.__name__.lower())
-            rows = cassandra_conn.session.execute(desc_query)
-            if len(rows) > 0:
-                add_fields = []
-                change_fields = []
-                add_fields = set(self._columns.keys()) - set([row.column_name for row in rows])
-                features = ["alter table %s ADD %s %s " % (self.__class__.__name__, key, cassandra_types[column._type]) for key, column in self._columns.items() if key in add_fields]
-                for feature in features:
-                    cassandra_conn.session.execute(feature)
-            else:
-                features = ["%s %s" % (key, cassandra_types[column._type]) for key,column in self._columns.items()]
-                query = "create table %s (%s, PRIMARY KEY (key))" % (self.__class__.__name__, ", ".join(features))
-                cassandra_conn.session.execute(query)
-            cassandra_conn.session.execute(command)
+        db_opt = {'table_name': self.__class__.__name__, 
+	          'table_schema': [[key, cassandra_types[column._type], str(column._indexed)] for key,column in self._columns.items()], 
+                  'rows': values}
+        if not db_opts:
+            return cassandra_conn.put(**db_opt)
+        db_opts.addOp(db_opt)
+
+def put_multi(models):
+    db_opt = db_opts()
+    [model.put(db_opt) for model in models]
+    return cassandra_conn.put_multi(db_opt)
