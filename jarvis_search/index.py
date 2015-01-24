@@ -136,10 +136,16 @@ class EsIndex:
         config['_source'] = _source
 
         config['index'] = self.__name
-        if config['reverse']:
-            config['sort']  = "_rank:asc"        
-        else:
-            config['sort']  = "_rank:desc"
+        match_only = False
+        try:         
+            del config['match_only']
+            match_only = True
+        except KeyError:
+            if config['reverse']:
+                config['sort']  = "_rank:asc"        
+            else:
+                config['sort']  = "_rank:desc"
+        reverse = config['reverse']
         del config['reverse']
         try:
             if is_appengine_environment:
@@ -156,7 +162,7 @@ class EsIndex:
                 response = es_client_conn.es.search(**config)
         except TransportError:
             return EsResultObject()
-        return EsResultObject(response)
+        return EsResultObject(response, match_only=match_only, reverse=reverse)
     def query_filtered(self, query_object):
         server = es_client_conn.SERVERS[0]
         credentials = server['http_auth'].split(':')
@@ -205,7 +211,7 @@ class EsActions:
         return self.__results
 
 class EsQueryObject:
-    def __init__(self, query_string, doc_type, returned_fields=[], limit=25, default_operator="AND", offset=0, reverse=False):
+    def __init__(self, query_string, doc_type, returned_fields=[], limit=25, default_operator="AND", offset=0, reverse=False, match_only=False):
         self.__config = {}
         if returned_fields:
             self.__config['_source'] = ",".join(returned_fields)
@@ -215,6 +221,10 @@ class EsQueryObject:
         self.__config['default_operator'] = default_operator
         self.__config['from_'] = offset
         self.__config['reverse'] = reverse
+        if match_only:
+            self.__config['match_only'] = True
+    def __del__(self):
+        del self.__config
     def getSearchObject(self):
         # temporary fix for index query, deleting parameters to make compatible to elasticsearch api
         return deepcopy(self.__config)
@@ -226,7 +236,7 @@ class EsQueryObject:
         return self.__config['from_']
 	
 class EsResultObject:
-    def __init__(self, response=None):
+    def __init__(self, response=None, match_only=False, reverse=False):
         self.documents = []
         self.total_count = 0
 
@@ -240,3 +250,5 @@ class EsResultObject:
                 fields.append(EsFieldBase(name=name, value=value))
             document = EsSearchDocument(rank=doc['_rank'], doc_type=result['_type'], fields=fields, id=result['_id'])
             self.documents.append(document)
+        if match_only:
+            self.documents = sorted(self.documents, key=lambda document: document['_rank'], reverse=not reverse)
