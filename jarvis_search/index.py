@@ -62,7 +62,8 @@ class EsIndex:
             "_index": self.__name,
             "_type": doc_type,
             "_id": doc.doc_id,
-            "doc": {},
+            "doc": {'_rank': doc.rank},
+            "doc_as_upsert": True
         }]
         for field in update_fields:
             actions[0]['doc'][field.name] = field.value

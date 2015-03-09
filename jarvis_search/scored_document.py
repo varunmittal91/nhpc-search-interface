@@ -79,7 +79,8 @@ class EsStringField(EsFieldBase):
         kwargs['value'] = " ".join(value)
         EsFieldBase.__init__(self, **kwargs)
 
-class EsTextField(EsFieldBase):
-    def __init__(self, **kwargs):
-        EsFieldBase.__init__(self, **kwargs)
+class EsTextField(EsFieldBase): pass
 
+class EsArrayField(EsFieldBase):
+    def __init__(self, **kwargs):
+        assert(type(kwargs.get('value', [])), list)
